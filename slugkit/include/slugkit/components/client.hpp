@@ -1,0 +1,86 @@
+#pragma once
+
+#include <slugkit/dto/forge.hpp>
+#include <slugkit/dto/mint.hpp>
+#include <slugkit/dto/pattern_info.hpp>
+#include <slugkit/dto/reset.hpp>
+#include <slugkit/dto/slice.hpp>
+#include <slugkit/types.hpp>
+
+#include <userver/components/component_base.hpp>
+#include <userver/utils/fast_pimpl.hpp>
+
+#include <vector>
+
+namespace slugkit::sdk::components {
+
+/// userver component wrapping the SlugKit HTTP API. Construct it via the
+/// usual ``components_manager.components.slugkit-client`` block; inject
+/// it into your handlers with ``context.FindComponent<Client>()``.
+///
+/// Static config:
+///
+/// ```yaml
+/// slugkit-client:
+///     base-url: https://slugkit.example.com    # required
+///     api-key#env: SLUGKIT_API_KEY               # required
+///     user-agent: my-service/1.0                 # optional
+///     request-timeout: 10s                       # optional, default 10s
+/// ```
+///
+/// All public methods may throw a subtype of ``slugkit::sdk::Error`` on
+/// failure. Network failures land as ``TransportError``; HTTP 4xx/5xx
+/// land as the matching status-derived subtype (``Unauthorized``,
+/// ``Forbidden``, ``NotFound``, ``RateLimited``, ``ClientError``,
+/// ``ServerError``). The error message carries the server-side reason
+/// when available.
+class Client : public userver::components::ComponentBase {
+public:
+    using BaseType = userver::components::ComponentBase;
+    constexpr static auto kName = "slugkit-client";
+
+    Client(
+        const userver::components::ComponentConfig& config,
+        const userver::components::ComponentContext& context
+    );
+
+    ~Client() override;
+
+    static auto GetStaticConfigSchema() -> userver::yaml_config::Schema;
+
+    /// Mint ``count`` fresh slugs from a series, advancing its sequence.
+    [[nodiscard]] auto Mint(const dto::MintRequest& request) const -> std::vector<Slug>;
+
+    /// Convenience: ``Mint`` with ``count = 1`` and a single-result return.
+    /// Throws if the server returned an empty list.
+    [[nodiscard]] auto MintOne(const dto::MintRequest& request) const -> Slug;
+
+    /// Generate slugs from a raw pattern. Stateless — no series sequence
+    /// is touched.
+    [[nodiscard]] auto Forge(const dto::ForgeRequest& request) const -> std::vector<Slug>;
+
+    /// Convenience: ``Forge`` with a single-result return.
+    [[nodiscard]] auto ForgeOne(const dto::ForgeRequest& request) const -> Slug;
+
+    /// Read deterministic slugs from a series at the given sequence offset
+    /// without advancing it. Useful for previews / replays.
+    [[nodiscard]] auto Slice(const dto::SliceRequest& request) const -> std::vector<Slug>;
+
+    /// Convenience: ``Slice`` with a single-result return.
+    [[nodiscard]] auto SliceOne(const dto::SliceRequest& request) const -> Slug;
+
+    /// Rewind a series back to sequence 0. Destructive on the server.
+    auto Reset(const dto::ResetRequest& request) const -> void;
+
+    /// Ask the server to analyse a pattern and return its capacity /
+    /// complexity / vocabulary footprint without generating any slugs.
+    [[nodiscard]] auto GetPatternInfo(const dto::PatternInfoRequest& request) const -> dto::PatternInfoResponse;
+
+private:
+    constexpr static auto kImplSize = 320UL;
+    constexpr static auto kImplAlign = 8UL;
+    struct Impl;
+    userver::utils::FastPimpl<Impl, kImplSize, kImplAlign> impl_;
+};
+
+}  // namespace slugkit::sdk::components
