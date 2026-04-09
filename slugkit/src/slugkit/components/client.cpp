@@ -6,6 +6,7 @@
 #include <userver/clients/http/component.hpp>
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
+#include <userver/engine/sleep.hpp>
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value.hpp>
 #include <userver/formats/json/value_builder.hpp>
@@ -14,7 +15,9 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,6 +32,40 @@ namespace http = userver::clients::http;
 constexpr auto kDefaultRequestTimeout = std::chrono::milliseconds{10000};
 constexpr auto kDefaultUserAgent = "slugkit-userver-sdk/1.0";
 constexpr auto kApiBase = "/api/v1/gen";
+
+/// Default retry tunables. SlugKit's serverless deployment can cold-start
+/// (sleeping instances), and transient 5xx / network blips happen in
+/// practice — so the SDK retries retriable failures with exponential
+/// backoff out of the box. Callers can override every knob via static
+/// config; setting ``max-attempts: 1`` disables retries entirely.
+constexpr auto kDefaultMaxAttempts = std::size_t{4};
+constexpr auto kDefaultInitialBackoff = std::chrono::milliseconds{250};
+constexpr auto kDefaultMaxBackoff = std::chrono::milliseconds{4000};
+
+struct RetryPolicy {
+    std::size_t max_attempts{kDefaultMaxAttempts};
+    std::chrono::milliseconds initial_backoff{kDefaultInitialBackoff};
+    std::chrono::milliseconds max_backoff{kDefaultMaxBackoff};
+};
+
+/// Compute the delay before attempt ``attempt_index`` (1-based: the
+/// delay returned is the wait *after* attempt ``attempt_index`` failed
+/// and before the next try). Pure exponential backoff capped at
+/// ``policy.max_backoff``; no jitter — userver's cooperative scheduler
+/// already smears wakeups across coroutines well enough that thundering
+/// herds aren't the SDK's problem to solve.
+auto BackoffFor(const RetryPolicy& policy, std::size_t attempt_index) -> std::chrono::milliseconds {
+    // attempt_index is 1 for the first failure, 2 for the second, etc.
+    // delay = initial * 2^(attempt_index - 1), clamped at max_backoff.
+    auto shift = attempt_index > 0 ? attempt_index - 1 : 0;
+    // Guard against overflow on absurd configs — anything past ~20
+    // doublings is meaningless once clamped, so saturate the shift.
+    shift = std::min<std::size_t>(shift, 20);
+    auto scaled = std::chrono::milliseconds{
+        policy.initial_backoff.count() * (std::int64_t{1} << shift),
+    };
+    return scaled < policy.max_backoff ? scaled : policy.max_backoff;
+}
 
 /// Pull a server-emitted error reason out of a JSON body. SlugKit's
 /// error responses are usually ``{"error": "..."}`` or
@@ -83,6 +120,7 @@ struct Client::Impl {
     std::string api_key;
     std::string user_agent;
     std::chrono::milliseconds request_timeout;
+    RetryPolicy retry_policy;
 
     std::string mint_url;
     std::string forge_url;
@@ -99,6 +137,11 @@ struct Client::Impl {
         , api_key(config["api-key"].As<std::string>())
         , user_agent(config["user-agent"].As<std::string>(kDefaultUserAgent))
         , request_timeout(config["request-timeout"].As<std::chrono::milliseconds>(kDefaultRequestTimeout))
+        , retry_policy{
+              config["retry"]["max-attempts"].As<std::size_t>(kDefaultMaxAttempts),
+              config["retry"]["initial-backoff"].As<std::chrono::milliseconds>(kDefaultInitialBackoff),
+              config["retry"]["max-backoff"].As<std::chrono::milliseconds>(kDefaultMaxBackoff),
+          }
         , mint_url(fmt::format("{}{}/mint", base_url, kApiBase))
         , forge_url(fmt::format("{}{}/forge", base_url, kApiBase))
         , slice_url(fmt::format("{}{}/slice", base_url, kApiBase))
@@ -110,16 +153,21 @@ struct Client::Impl {
         if (api_key.empty()) {
             throw std::runtime_error("slugkit-client: api-key is empty (set SLUGKIT_API_KEY)");
         }
+        if (retry_policy.max_attempts == 0) {
+            throw std::runtime_error("slugkit-client: retry.max-attempts must be >= 1");
+        }
     }
 
-    [[nodiscard]] auto Post(std::string_view url, json::Value body, std::string_view operation) const
-        -> json::Value {
-        auto request_body = json::ToString(body);
+    /// One round-trip. Maps transport failures to ``TransportError`` and
+    /// non-2xx statuses to the matching ``Error`` subtype. The retry
+    /// loop in ``Post`` decides which of those are worth re-trying.
+    [[nodiscard]] auto PostOnce(std::string_view url, const std::string& request_body, std::string_view operation)
+        const -> json::Value {
         std::shared_ptr<http::Response> response;
         try {
             response = http_client.GetHttpClient()
                            .CreateRequest()
-                           .post(std::string{url}, std::move(request_body))
+                           .post(std::string{url}, request_body)
                            .headers({
                                {"content-type", "application/json"},
                                {"accept", "application/json"},
@@ -129,7 +177,6 @@ struct Client::Impl {
                            .timeout(request_timeout)
                            .perform();
         } catch (const std::exception& e) {
-            LOG_WARNING() << "slugkit " << operation << " transport error: " << e.what();
             throw TransportError{fmt::format("slugkit {}: {}", operation, e.what())};
         }
 
@@ -142,6 +189,53 @@ struct Client::Impl {
             return json::FromString(body_str);
         } catch (const std::exception& e) {
             throw Error{fmt::format("slugkit {}: malformed JSON response — {}", operation, e.what())};
+        }
+    }
+
+    /// Retry-aware POST. Retriable failures — transport errors, HTTP 5xx,
+    /// and HTTP 429 — are re-tried up to ``retry_policy.max_attempts``
+    /// times with exponential backoff. Anything else (4xx other than 429,
+    /// malformed JSON) propagates immediately because retrying won't help.
+    [[nodiscard]] auto Post(std::string_view url, json::Value body, std::string_view operation) const
+        -> json::Value {
+        auto request_body = json::ToString(body);
+        for (std::size_t attempt = 1;; ++attempt) {
+            try {
+                return PostOnce(url, request_body, operation);
+            } catch (const TransportError& e) {
+                if (attempt >= retry_policy.max_attempts) {
+                    LOG_WARNING() << "slugkit " << operation << " transport error after " << attempt
+                                  << " attempt(s): " << e.what();
+                    throw;
+                }
+                auto delay = BackoffFor(retry_policy, attempt);
+                LOG_WARNING() << "slugkit " << operation << " transport error on attempt " << attempt << "/"
+                              << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
+                              << e.what();
+                userver::engine::SleepFor(delay);
+            } catch (const ServerError& e) {
+                if (attempt >= retry_policy.max_attempts) {
+                    LOG_WARNING() << "slugkit " << operation << " server error after " << attempt
+                                  << " attempt(s): " << e.what();
+                    throw;
+                }
+                auto delay = BackoffFor(retry_policy, attempt);
+                LOG_WARNING() << "slugkit " << operation << " 5xx on attempt " << attempt << "/"
+                              << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
+                              << e.what();
+                userver::engine::SleepFor(delay);
+            } catch (const RateLimited& e) {
+                if (attempt >= retry_policy.max_attempts) {
+                    LOG_WARNING() << "slugkit " << operation << " rate-limited after " << attempt
+                                  << " attempt(s): " << e.what();
+                    throw;
+                }
+                auto delay = BackoffFor(retry_policy, attempt);
+                LOG_WARNING() << "slugkit " << operation << " 429 on attempt " << attempt << "/"
+                              << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
+                              << e.what();
+                userver::engine::SleepFor(delay);
+            }
         }
     }
 
@@ -188,6 +282,32 @@ properties:
         type: string
         description: HTTP request timeout
         defaultDescription: 10s
+    retry:
+        type: object
+        description: |
+            Retry policy for transient failures (transport errors, HTTP
+            5xx, HTTP 429). Non-retriable errors (4xx other than 429,
+            malformed JSON) bypass the loop entirely.
+        additionalProperties: false
+        properties:
+            max-attempts:
+                type: integer
+                description: |
+                    Total attempts including the first one. ``1`` disables
+                    retries; the SDK still maps failures to typed errors.
+                defaultDescription: '4'
+            initial-backoff:
+                type: string
+                description: |
+                    Wait before the first retry. Subsequent retries
+                    double this delay until ``max-backoff`` is reached.
+                defaultDescription: 250ms
+            max-backoff:
+                type: string
+                description: |
+                    Cap on the per-retry wait. Exponential growth stops
+                    here; further retries reuse the same delay.
+                defaultDescription: 4s
     )");
 }
 
