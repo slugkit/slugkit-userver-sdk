@@ -26,6 +26,10 @@ namespace slugkit::sdk::components {
 ///     api-key#env: SLUGKIT_API_KEY               # required
 ///     user-agent: my-service/1.0                 # optional
 ///     request-timeout: 10s                       # optional, default 10s
+///     retry:                                     # optional
+///         max-attempts: 4                        # default 4 (set to 1 to disable)
+///         initial-backoff: 250ms                 # default 250ms
+///         max-backoff: 4s                        # default 4s
 /// ```
 ///
 /// All public methods may throw a subtype of ``slugkit::sdk::Error`` on
@@ -34,6 +38,11 @@ namespace slugkit::sdk::components {
 /// ``Forbidden``, ``NotFound``, ``RateLimited``, ``ClientError``,
 /// ``ServerError``). The error message carries the server-side reason
 /// when available.
+///
+/// Retries: transient failures — ``TransportError``, ``ServerError``
+/// (HTTP 5xx), and ``RateLimited`` (HTTP 429) — are retried with
+/// exponential backoff up to ``retry.max-attempts``. Non-retriable
+/// errors (other 4xx, malformed JSON) propagate immediately.
 class Client : public userver::components::ComponentBase {
 public:
     using BaseType = userver::components::ComponentBase;
