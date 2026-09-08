@@ -60,18 +60,36 @@ struct SeriesSettings {
     std::string pattern_source;
 };
 
+/// What one refill pass did. Everything a caller needs to report the pool's
+/// health without repeating the arithmetic or parsing the log.
+struct RefillOutcome {
+    /// Slugs held when the pass began; unset when the store could not be read,
+    /// which is the one case where the pass knows nothing at all.
+    std::optional<std::int64_t> size_before;
+    /// Slugs actually added, after any duplicates the store ignored.
+    std::int64_t added{0};
+    /// Minted, then discarded for not matching the series' configured shape.
+    /// Non-zero means the series' pattern has drifted from what was expected.
+    std::int64_t discarded{0};
+
+    bool size_failed{false};
+    bool mint_failed{false};
+    bool store_failed{false};
+
+    /// True when the pass completed without any step failing — including the
+    /// common case of a pool that needed nothing.
+    [[nodiscard]] auto Ok() const noexcept -> bool { return !size_failed && !mint_failed && !store_failed; }
+};
+
 /// Brings one series' pool back up to its target, if it has fallen below its
 /// waterline.
 ///
-/// Never throws: every failure is a logged outcome, because this runs on a timer
-/// and there is nobody to propagate to. The levels are deliberately uneven — a
-/// mint that could not reach SlugKit is a warning, since the pool is the buffer
-/// and treating a transient outage as an incident would waste it, while a pool
-/// found empty is an error, since by then whatever draws from it is already
-/// failing.
-///
-/// @returns how many slugs were added; zero on any failure, and zero when the
-/// pool did not need topping up.
-auto RefillSeries(const Minter& minter, Storage& storage, const SeriesSettings& settings) -> std::int64_t;
+/// Never throws: every failure is a reported outcome, because this runs on a
+/// timer and there is nobody to propagate to. The log levels are deliberately
+/// uneven — a mint that could not reach SlugKit is a warning, since the pool is
+/// the buffer and treating a transient outage as an incident would waste it,
+/// while a pool found empty is an error, since by then whatever draws from it is
+/// already failing.
+auto RefillSeries(const Minter& minter, Storage& storage, const SeriesSettings& settings) -> RefillOutcome;
 
 }  // namespace slugkit::sdk::pool

@@ -8,9 +8,13 @@
 
 #include <userver/components/component_base.hpp>
 #include <userver/utils/periodic_task.hpp>
+#include <userver/utils/statistics/entry.hpp>
+#include <userver/utils/statistics/writer.hpp>
 #include <userver/yaml_config/schema.hpp>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -45,6 +49,7 @@ class Storage;
 ///     client: slugkit-client           # optional, defaults to slugkit-client
 ///     period: 5m                       # optional, default 5m
 ///     refill-on-start: true            # optional, default true
+///     metrics-prefix: slug-pool        # optional, default slug-pool
 ///     series:
 ///         - series: my-user-series
 ///           low-water: 500              # optional, default 500
@@ -89,9 +94,33 @@ public:
     auto Replenish() -> std::int64_t;
 
 private:
+    /// What the metrics report. Written by the periodic pass, read by a scrape,
+    /// hence the atomics.
+    ///
+    /// `size` is what the *last pass observed*, not a live count: a scrape must
+    /// not put a query on the database, and a figure at most one period old is
+    /// what alerting on a slow drain needs anyway.
+    struct SeriesStats {
+        std::atomic<std::int64_t> size{-1};  ///< -1 until a pass has observed one
+        std::atomic<std::uint64_t> added{0};
+        std::atomic<std::uint64_t> discarded{0};
+        std::atomic<std::uint64_t> size_failures{0};
+        std::atomic<std::uint64_t> mint_failures{0};
+        std::atomic<std::uint64_t> store_failures{0};
+    };
+
+    struct SeriesState {
+        SeriesSettings settings;
+        SeriesStats stats;
+    };
+
+    void WriteStatistics(userver::utils::statistics::Writer& writer) const;
+
     ClientMinter minter_;
     Storage& storage_;
-    std::vector<SeriesSettings> series_;
+    /// Indirected because SeriesStats holds atomics, which a vector cannot move.
+    std::vector<std::unique_ptr<SeriesState>> series_;
+    userver::utils::statistics::Entry statistics_holder_;
     userver::utils::PeriodicTask task_;
 };
 
