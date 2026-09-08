@@ -188,6 +188,29 @@ draws inside the caller's transaction; a store without transactions cannot
 offer that and should not pretend to. Each store exposes its own `Draw`, typed
 to what it actually needs.
 
+### Metrics
+
+The replenisher registers a writer under `slug-pool` (configurable via
+`metrics-prefix`), labelled by `slugkit_series`:
+
+| Metric | Kind | |
+|---|---|---|
+| `size` | gauge | Slugs held after the last pass. Absent for a series no pass has looked at yet — a pool nobody has checked is not a pool that is empty, and the difference matters during a deploy. |
+| `low-water`, `target` | gauge | The configured watermarks, echoed so a dashboard can show headroom and an alert can be written against `size / low-water` without hardcoding figures that live in the service's config. |
+| `added` | rate | Slugs stored. Flat while a pool sits comfortably above its waterline — that is the healthy case, not a stall. |
+| `discarded` | rate | Minted, then rejected by the `pattern` guard. Any non-zero value means the series no longer produces what the service can use. |
+| `errors` | rate | Failed passes, labelled `slugkit_stage` = `size` \| `mint` \| `store`. |
+
+`size` is what the last pass observed, not a live count: a scrape must not put a
+query on your database, and a figure at most one period old is what alerting on
+a slow drain needs anyway.
+
+**What to alert on.** Not absolute size — a reserve of 200 is comfortable for one
+series and nearly dry for another. Alert on the ratio to `low-water`, or better
+on time-to-empty (the drain rate against the current `size`), and on a sustained
+non-zero `errors{slugkit_stage="mint"}`, which is the pool quietly failing to
+refill while it still looks full.
+
 ### Failure, and how loud it is
 
 | What happened | Level | Why |
