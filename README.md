@@ -50,6 +50,28 @@ components_manager:
                   max-per-request: 150
 ```
 
+> **Series names must come from `config_vars`, not `#env`.** userver enables
+> environment lookups only for a component's *top-level* config keys. Inside the
+> `series` list it refuses outright — `YamlConfig was not constructed with
+> Mode::kEnvAllowed` — and moving the `#env` into `config_vars` does not help,
+> because that file is parsed in secure mode. A `$var` reference does resolve at
+> any depth, so route the series through a config var:
+>
+> ```yaml
+> # config_vars.yaml
+> account-series: my-account-handles
+>
+> # static_config.yaml
+> slugkit-pool:
+>     series:
+>         - series: $account-series
+> ```
+>
+> Beware that a config var rendered from a template (`envsubst` and similar)
+> yields an empty string for an unset variable rather than an error, and the
+> replenisher then refuses to start on an empty series name. Check the variable
+> is set where you render it, so the failure names the variable.
+
 Watermarks are per series because demand is: two series in one service can
 easily differ by an order of magnitude in how fast they drain, and one global
 figure would either hold a wasteful reserve of the slow one or an inadequate
