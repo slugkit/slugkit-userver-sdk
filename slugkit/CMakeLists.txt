@@ -7,6 +7,7 @@ option(SLUGKIT_BUILD_POOL_POSTGRES "Build the PostgreSQL slug-pool store (needs 
 set(SLUGKIT_SRC
     include/slugkit/types.hpp
     include/slugkit/exceptions.hpp
+    include/slugkit/secrets.hpp
 
     include/slugkit/dto/mint.hpp
     include/slugkit/dto/forge.hpp
@@ -17,6 +18,7 @@ set(SLUGKIT_SRC
     include/slugkit/components/client.hpp
 
     src/slugkit/components/client.cpp
+    src/slugkit/secrets.cpp
 
     # Slug pool: mint ahead of demand so request paths never wait on SlugKit.
     include/slugkit/pool/policy.hpp
@@ -54,6 +56,7 @@ if(SLUGKIT_BUILD_TESTS)
         tests/policy_test.cpp
         tests/memory_pool_test.cpp
         tests/refill_test.cpp
+        tests/secrets_test.cpp
     )
     target_link_libraries(slugkit_unittest PRIVATE slugkit_client userver::utest)
     target_include_directories(slugkit_unittest PRIVATE

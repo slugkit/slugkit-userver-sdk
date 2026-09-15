@@ -1,6 +1,7 @@
 #include <slugkit/components/client.hpp>
 
 #include <slugkit/exceptions.hpp>
+#include <slugkit/secrets.hpp>
 
 #include <userver/clients/http/client.hpp>
 #include <userver/clients/http/component.hpp>
@@ -11,12 +12,14 @@
 #include <userver/formats/json/value.hpp>
 #include <userver/formats/json/value_builder.hpp>
 #include <userver/logging/log.hpp>
+#include <userver/storages/secdist/component.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
 
 #include <fmt/format.h>
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -112,6 +115,47 @@ auto ExtractReason(std::string_view body) -> std::string {
     throw Error{std::move(message)};
 }
 
+/// The base URL and the key the client talks to SlugKit with.
+struct Endpoint {
+    std::string base_url;
+    std::string api_key;
+    /// The series the secdist block names, when it names one.
+    std::optional<SeriesSlug> series;
+};
+
+/// Reads the endpoint from the static config, then — when the component names a
+/// block with `secdist-alias` — from secdist, which wins for both.
+///
+/// A named block that is missing is fatal rather than a silent fallback to the
+/// static config: a component told to expect its key in secdist and not finding
+/// it is misconfigured, and one that went on to mint with whatever `api-key`
+/// happened to hold would hide that until the key was rotated away.
+auto ResolveEndpoint(
+    const userver::components::ComponentConfig& config,
+    const userver::components::ComponentContext& context
+) -> Endpoint {
+    Endpoint endpoint{config["base-url"].As<std::string>(""), config["api-key"].As<std::string>("")};
+
+    const auto alias = config["secdist-alias"].As<std::string>("");
+    if (alias.empty()) {
+        return endpoint;
+    }
+
+    const auto& secrets = context.FindComponent<userver::components::Secdist>().Get().Get<Secrets>();
+    const auto* credentials = secrets.Find(alias);
+    if (credentials == nullptr) {
+        throw std::runtime_error(fmt::format("slugkit-client: secdist has no slugkit.{} block", alias));
+    }
+    endpoint.api_key = credentials->api_key;
+    if (credentials->series.has_value() && !credentials->series->empty()) {
+        endpoint.series = SeriesSlug{*credentials->series};
+    }
+    if (credentials->base_url.has_value() && !credentials->base_url->empty()) {
+        endpoint.base_url = *credentials->base_url;
+    }
+    return endpoint;
+}
+
 }  // namespace
 
 struct Client::Impl {
@@ -119,6 +163,7 @@ struct Client::Impl {
     std::string base_url;
     std::string api_key;
     std::string user_agent;
+    std::optional<SeriesSlug> series;
     std::chrono::milliseconds request_timeout;
     RetryPolicy retry_policy;
 
@@ -132,9 +177,17 @@ struct Client::Impl {
         const userver::components::ComponentConfig& config,
         const userver::components::ComponentContext& context
     )
+        : Impl(config, context, ResolveEndpoint(config, context)) {}
+
+    Impl(
+        const userver::components::ComponentConfig& config,
+        const userver::components::ComponentContext& context,
+        Endpoint endpoint
+    )
         : http_client(context.FindComponent<userver::components::HttpClient>())
-        , base_url(config["base-url"].As<std::string>())
-        , api_key(config["api-key"].As<std::string>())
+        , base_url(std::move(endpoint.base_url))
+        , api_key(std::move(endpoint.api_key))
+        , series(std::move(endpoint.series))
         , user_agent(config["user-agent"].As<std::string>(kDefaultUserAgent))
         , request_timeout(config["request-timeout"].As<std::chrono::milliseconds>(kDefaultRequestTimeout))
         , retry_policy{
@@ -148,10 +201,12 @@ struct Client::Impl {
         , reset_url(fmt::format("{}{}/reset", base_url, kApiBase))
         , pattern_info_url(fmt::format("{}{}/pattern-info", base_url, kApiBase)) {
         if (base_url.empty()) {
-            throw std::runtime_error("slugkit-client: base-url is required");
+            throw std::runtime_error("slugkit-client: base-url is required (static config, or base_url in the secdist block)");
         }
         if (api_key.empty()) {
-            throw std::runtime_error("slugkit-client: api-key is empty (set SLUGKIT_API_KEY)");
+            throw std::runtime_error(
+                "slugkit-client: no API key (name a secdist block with secdist-alias, or set api-key)"
+            );
         }
         if (retry_policy.max_attempts == 0) {
             throw std::runtime_error("slugkit-client: retry.max-attempts must be >= 1");
@@ -262,6 +317,8 @@ Client::Client(
 
 Client::~Client() = default;
 
+auto Client::Series() const -> const std::optional<SeriesSlug>& { return impl_->series; }
+
 auto Client::GetStaticConfigSchema() -> userver::yaml_config::Schema {
     return userver::yaml_config::MergeSchemas<userver::components::ComponentBase>(R"(
 type: object
@@ -270,10 +327,13 @@ additionalProperties: false
 properties:
     base-url:
         type: string
-        description: Base URL of the SlugKit server (no trailing slash)
+        description: Base URL of the SlugKit server (no trailing slash); overridden by base_url in the secdist block
     api-key:
         type: string
-        description: API key sent in the X-API-Key header. Source via #env in production.
+        description: API key sent in the X-API-Key header. Prefer secdist-alias, which keeps the key out of the rendered config.
+    secdist-alias:
+        type: string
+        description: the block under `slugkit` in the secdist document holding api_key (and optionally base_url); wins over api-key and base-url
     user-agent:
         type: string
         description: User-Agent header sent with every request

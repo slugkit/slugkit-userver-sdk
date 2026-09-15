@@ -14,8 +14,9 @@ mint slugs from any handler — no rolling-your-own HTTP client.
 | `Reset` | `POST /api/v1/gen/reset` | Rewind a series back to sequence 0. |
 | `GetPatternInfo` | `POST /api/v1/gen/pattern-info` | Analyse a pattern (capacity, complexity, vocabulary footprint). |
 
-Auth is via the `X-API-Key` header. Source the key from the environment
-in your service's static config so it never lands in version control.
+Auth is via the `X-API-Key` header. Keep the key out of the static config:
+name a secdist block with `secdist-alias` (below), or at least source `api-key`
+from the environment so it never lands in version control.
 
 ## Slug pool — surviving a SlugKit outage
 
@@ -33,7 +34,7 @@ components_manager:
     components:
         slugkit-client:
             base-url: https://slugkit.example.com
-            api-key#env: SLUGKIT_API_KEY
+            secdist-alias: accounts
 
         slugkit-pool-postgres:
             postgres: postgres-main
@@ -42,8 +43,8 @@ components_manager:
         slugkit-pool:
             storage: slugkit-pool-postgres
             series:
-                - series: account-handles
-                  pattern: '^[a-z0-9-]{3,63}$'
+                  # No `series`: taken from the client's secdist block.
+                - pattern: '^[a-z0-9-]{3,63}$'
                 - series: tenant-slugs
                   low-water: 50
                   target: 200
@@ -188,6 +189,28 @@ draws inside the caller's transaction; a store without transactions cannot
 offer that and should not pretend to. Each store exposes its own `Draw`, typed
 to what it actually needs.
 
+### More than one pool in a process
+
+Append each replenisher under a name of its own, and point each at its own
+store:
+
+```cpp
+components
+    .Append<slugkit::sdk::pool::PostgresStorage>("accounts-pool-postgres")
+    .Append<slugkit::sdk::pool::Replenisher>("accounts-pool")
+    .Append<slugkit::sdk::pool::PostgresStorage>("sku-pool-postgres")
+    .Append<slugkit::sdk::pool::Replenisher>("sku-pool");
+```
+
+The replenisher's periodic task, and under testsuite its task, take the
+component's name. Two would otherwise collide: the testsuite registry refuses a
+second task of the same name and the service does not start. Drive one from a
+test with `service_client.run_task('<component name>')`; an unnamed replenisher
+is `slugkit-pool`.
+
+Give each its own `metrics-prefix` as well, or the two report their gauges under
+one prefix and a dashboard has to separate them by the `slugkit_series` label.
+
 ### Metrics
 
 The replenisher registers a writer under `slug-pool` (configurable via
@@ -245,15 +268,53 @@ components_manager:
   components:
     slugkit-client:
       base-url: https://slugkit.example.com
-      api-key#env: SLUGKIT_API_KEY
+      secdist-alias: accounts     # or api-key#env: SLUGKIT_API_KEY
       user-agent: my-service/1.0
       request-timeout: 10s
 ```
 
-`base-url` and `api-key` are required; `user-agent` and `request-timeout`
-default to `slugkit-userver-sdk/1.0` and `10s` respectively. Use the
-standard userver `#env` suffix to source the API key from an environment
-variable instead of inlining it.
+`base-url` and a key are required; `user-agent` and `request-timeout`
+default to `slugkit-userver-sdk/1.0` and `10s` respectively.
+
+### The key from secdist
+
+Prefer secdist to `api-key`. userver renders a static config through templates
+onto disk, so a key filled in from an environment variable still ends up in a
+file; secdist is read once at startup and never becomes part of the rendered
+config.
+
+```yaml
+slugkit-client:
+    base-url: https://slugkit.example.com
+    secdist-alias: accounts
+```
+
+```json
+{
+  "slugkit": {
+    "accounts": {
+      "api_key": "sk_…",
+      "series": "apart-rushy-hooey-ac1b",
+      "base_url": "https://slugkit.example.com"
+    }
+  }
+}
+```
+
+Name the block after the consumer, not the provider: two pools minting two
+series then hold two keys, which can be scoped to their own series and rotated
+apart.
+
+`series` and `base_url` are optional and travel with the key because both belong
+to the account it is for. `base_url` wins over the static config; `series` is
+offered through `Client::Series()`, and a pool whose `series` entry names none
+takes it — so pointing a consumer at another SlugKit account is one change to
+one block rather than a key change plus a redeploy for the config naming the
+series.
+
+The client refuses to start when the named block is missing — a component told
+to expect its key in secdist should not quietly mint with whatever `api-key`
+holds. `api-key` (with `#env`) still works where secdist is not set up.
 
 Then register the component in your `main.cpp`:
 
