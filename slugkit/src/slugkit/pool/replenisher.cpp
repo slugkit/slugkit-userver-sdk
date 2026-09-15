@@ -38,11 +38,25 @@ Replenisher::Replenisher(
     : ComponentBase{config, context}
     , minter_{context.FindComponent<components::Client>(config["client"].As<std::string>(std::string{components::Client::kName}))}
     , storage_{context.FindComponent<Storage>(config["storage"].As<std::string>())} {
+    const auto& client = context.FindComponent<components::Client>(
+        config["client"].As<std::string>(std::string{components::Client::kName})
+    );
+
     for (const auto& entry : config["series"]) {
         SeriesSettings series;
-        series.series = SeriesSlug{entry["series"].As<std::string>()};
-        if (series.series.GetUnderlying().empty()) {
-            throw std::runtime_error{"slugkit-pool: every entry in `series` needs a non-empty `series`"};
+        // The series is the client's when its secdist block names one: a
+        // consumer minting from a single series has that series and its key from
+        // the same account, so both live in the same block and neither is a
+        // config var. An entry may still name its own, which is what a pool
+        // keeping several series does.
+        const auto named = entry["series"].As<std::string>("");
+        if (!named.empty()) {
+            series.series = SeriesSlug{named};
+        } else if (client.Series().has_value()) {
+            series.series = *client.Series();
+        } else {
+            throw std::runtime_error{
+                "slugkit-pool: an entry in `series` names no series and the client's secdist block carries none"};
         }
 
         if (auto org_id = entry["org-id"].As<std::optional<std::string>>(); org_id.has_value()) {
@@ -156,7 +170,8 @@ properties:
             properties:
                 series:
                     type: string
-                    description: the SlugKit series slug to mint from; also the pool key
+                    description: the SlugKit series slug to mint from; also the pool key. Omit to take the series from the client's secdist block.
+                    defaultDescription: the client's secdist series
                 org-id:
                     type: string
                     description: target organisation; only meaningful for multi-org API keys
