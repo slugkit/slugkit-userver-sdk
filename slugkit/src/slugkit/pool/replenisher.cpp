@@ -91,11 +91,17 @@ Replenisher::Replenisher(
         [this](userver::utils::statistics::Writer& writer) { WriteStatistics(writer); }
     );
 
+    // Named after the component, not the class: a service that keeps two pools
+    // appends two replenishers under two names, and a fixed name would collide in
+    // the testsuite registry, which refuses a second task of the same name. An
+    // unnamed replenisher is still `slugkit-pool`.
+    const auto task_name = config.Name();
+
     auto& testsuite_tasks = userver::testsuite::GetTestsuiteTasks(context);
     if (testsuite_tasks.IsEnabled()) {
         // Leave the timer stopped so a test fires a pass on demand and asserts
         // what the task did, rather than how long it waited.
-        testsuite_tasks.RegisterTask(std::string{kName}, [this] { Replenish(); });
+        testsuite_tasks.RegisterTask(task_name, [this] { Replenish(); });
     } else {
         const auto period = config["period"].As<std::chrono::milliseconds>(std::chrono::minutes{5});
         userver::utils::Flags<userver::utils::PeriodicTask::Flags> flags{userver::utils::PeriodicTask::Flags::kStrong};
@@ -106,7 +112,7 @@ Replenisher::Replenisher(
             // and never blocks or fails service startup.
             flags |= userver::utils::PeriodicTask::Flags::kNow;
         }
-        task_.Start(std::string{kName}, {period, flags}, [this] { Replenish(); });
+        task_.Start(task_name, {period, flags}, [this] { Replenish(); });
     }
 }
 

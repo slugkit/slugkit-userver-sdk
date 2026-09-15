@@ -188,6 +188,28 @@ draws inside the caller's transaction; a store without transactions cannot
 offer that and should not pretend to. Each store exposes its own `Draw`, typed
 to what it actually needs.
 
+### More than one pool in a process
+
+Append each replenisher under a name of its own, and point each at its own
+store:
+
+```cpp
+components
+    .Append<slugkit::sdk::pool::PostgresStorage>("accounts-pool-postgres")
+    .Append<slugkit::sdk::pool::Replenisher>("accounts-pool")
+    .Append<slugkit::sdk::pool::PostgresStorage>("sku-pool-postgres")
+    .Append<slugkit::sdk::pool::Replenisher>("sku-pool");
+```
+
+The replenisher's periodic task, and under testsuite its task, take the
+component's name. Two would otherwise collide: the testsuite registry refuses a
+second task of the same name and the service does not start. Drive one from a
+test with `service_client.run_task('<component name>')`; an unnamed replenisher
+is `slugkit-pool`.
+
+Give each its own `metrics-prefix` as well, or the two report their gauges under
+one prefix and a dashboard has to separate them by the `slugkit_series` label.
+
 ### Metrics
 
 The replenisher registers a writer under `slug-pool` (configurable via
