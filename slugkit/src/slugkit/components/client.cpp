@@ -134,7 +134,12 @@ auto ResolveEndpoint(
     const userver::components::ComponentConfig& config,
     const userver::components::ComponentContext& context
 ) -> Endpoint {
-    Endpoint endpoint{config["base-url"].As<std::string>(""), config["api-key"].As<std::string>("")};
+    Endpoint endpoint{
+        .base_url = config["base-url"].As<std::string>(""),
+        .api_key = config["api-key"].As<std::string>(""),
+        // Only secdist names a series; the static config has no key for one.
+        .series = std::nullopt,
+    };
 
     const auto alias = config["secdist-alias"].As<std::string>("");
     if (alias.empty()) {
@@ -187,8 +192,8 @@ struct Client::Impl {
         : http_client(context.FindComponent<userver::components::HttpClient>())
         , base_url(std::move(endpoint.base_url))
         , api_key(std::move(endpoint.api_key))
-        , series(std::move(endpoint.series))
         , user_agent(config["user-agent"].As<std::string>(kDefaultUserAgent))
+        , series(std::move(endpoint.series))
         , request_timeout(config["request-timeout"].As<std::chrono::milliseconds>(kDefaultRequestTimeout))
         , retry_policy{
               config["retry"]["max-attempts"].As<std::size_t>(kDefaultMaxAttempts),
