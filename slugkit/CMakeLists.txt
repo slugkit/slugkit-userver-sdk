@@ -16,8 +16,10 @@ set(SLUGKIT_SRC
     include/slugkit/dto/pattern_info.hpp
 
     include/slugkit/components/client.hpp
+    include/slugkit/metrics.hpp
 
     src/slugkit/components/client.cpp
+    src/slugkit/metrics.cpp
     src/slugkit/secrets.cpp
 
     # Slug pool: mint ahead of demand so request paths never wait on SlugKit.
@@ -57,6 +59,7 @@ if(SLUGKIT_BUILD_TESTS)
         tests/memory_pool_test.cpp
         tests/refill_test.cpp
         tests/secrets_test.cpp
+        tests/metrics_test.cpp
     )
     target_link_libraries(slugkit_unittest PRIVATE slugkit_client userver::utest)
     target_include_directories(slugkit_unittest PRIVATE

@@ -102,7 +102,7 @@ public:
     [[nodiscard]] auto GetPatternInfo(const dto::PatternInfoRequest& request) const -> dto::PatternInfoResponse;
 
 private:
-    constexpr static auto kImplSize = 336UL;
+    constexpr static auto kImplSize = 416UL;
     constexpr static auto kImplAlign = 8UL;
     struct Impl;
     userver::utils::FastPimpl<Impl, kImplSize, kImplAlign> impl_;

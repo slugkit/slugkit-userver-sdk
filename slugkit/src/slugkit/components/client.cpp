@@ -1,18 +1,22 @@
 #include <slugkit/components/client.hpp>
 
 #include <slugkit/exceptions.hpp>
+#include <slugkit/metrics.hpp>
 #include <slugkit/secrets.hpp>
 
 #include <userver/clients/http/client.hpp>
 #include <userver/clients/http/component.hpp>
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
+#include <userver/components/statistics_storage.hpp>
 #include <userver/engine/sleep.hpp>
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value.hpp>
 #include <userver/formats/json/value_builder.hpp>
 #include <userver/logging/log.hpp>
 #include <userver/storages/secdist/component.hpp>
+#include <userver/utils/statistics/entry.hpp>
+#include <userver/utils/statistics/labels.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
 
 #include <fmt/format.h>
@@ -178,6 +182,13 @@ struct Client::Impl {
     std::string reset_url;
     std::string pattern_info_url;
 
+    /// Mutable because a call is logically const — it asks SlugKit something —
+    /// and counting it is bookkeeping about the call, not a change to the client.
+    mutable ClientMetrics metrics;
+    /// Registered by the component once `metrics` exists, unregistered before
+    /// it goes.
+    userver::utils::statistics::Entry statistics_holder;
+
     Impl(
         const userver::components::ComponentConfig& config,
         const userver::components::ComponentContext& context
@@ -223,6 +234,14 @@ struct Client::Impl {
     /// loop in ``Post`` decides which of those are worth re-trying.
     [[nodiscard]] auto PostOnce(std::string_view url, const std::string& request_body, std::string_view operation)
         const -> json::Value {
+        const auto started = std::chrono::steady_clock::now();
+        const auto account = [&](Outcome outcome) {
+            metrics.Account(
+                operation, outcome,
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+            );
+        };
+
         std::shared_ptr<http::Response> response;
         try {
             response = http_client.GetHttpClient()
@@ -237,19 +256,25 @@ struct Client::Impl {
                            .timeout(request_timeout)
                            .perform();
         } catch (const std::exception& e) {
+            account(Outcome::kTransportError);
             throw TransportError{fmt::format("slugkit {}: {}", operation, e.what())};
         }
 
         const auto status = static_cast<int>(response->status_code());
         const auto body_str = response->body();
         if (status / 100 != 2) {
+            account(OutcomeForStatus(status));
             ThrowForStatus(status, operation, body_str);
         }
+        json::Value parsed;
         try {
-            return json::FromString(body_str);
+            parsed = json::FromString(body_str);
         } catch (const std::exception& e) {
+            account(Outcome::kMalformed);
             throw Error{fmt::format("slugkit {}: malformed JSON response — {}", operation, e.what())};
         }
+        account(Outcome::kOk);
+        return parsed;
     }
 
     /// Retry-aware POST. Retriable failures — transport errors, HTTP 5xx,
@@ -272,6 +297,7 @@ struct Client::Impl {
                 LOG_WARNING() << "slugkit " << operation << " transport error on attempt " << attempt << "/"
                               << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
                               << e.what();
+                metrics.AccountRetry(operation);
                 userver::engine::SleepFor(delay);
             } catch (const ServerError& e) {
                 if (attempt >= retry_policy.max_attempts) {
@@ -283,6 +309,7 @@ struct Client::Impl {
                 LOG_WARNING() << "slugkit " << operation << " 5xx on attempt " << attempt << "/"
                               << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
                               << e.what();
+                metrics.AccountRetry(operation);
                 userver::engine::SleepFor(delay);
             } catch (const RateLimited& e) {
                 if (attempt >= retry_policy.max_attempts) {
@@ -294,6 +321,7 @@ struct Client::Impl {
                 LOG_WARNING() << "slugkit " << operation << " 429 on attempt " << attempt << "/"
                               << retry_policy.max_attempts << ", retrying in " << delay.count() << "ms: "
                               << e.what();
+                metrics.AccountRetry(operation);
                 userver::engine::SleepFor(delay);
             }
         }
@@ -318,9 +346,23 @@ Client::Client(
     const userver::components::ComponentContext& context
 )
     : userver::components::ComponentBase{config, context}
-    , impl_{config, context} {}
+    , impl_{config, context} {
+    for (const auto* operation : {"mint", "forge", "slice", "reset", "pattern-info"}) {
+        impl_->metrics.Declare(operation);
+    }
+    impl_->statistics_holder =
+        context.FindComponent<userver::components::StatisticsStorage>().GetStorage().RegisterWriter(
+            config["metrics-prefix"].As<std::string>("slugkit.client"),
+            [this](userver::utils::statistics::Writer& writer) { writer = impl_->metrics; },
+            // By component name: a process can hold more than one client — the
+            // omnibus runs authx's and station's side by side — and two writers
+            // under one prefix without a label between them would emit the same
+            // series twice, which Prometheus refuses as a malformed scrape.
+            {userver::utils::statistics::Label{"slugkit_client", std::string{config.Name()}}}
+        );
+}
 
-Client::~Client() = default;
+Client::~Client() { impl_->statistics_holder.Unregister(); }
 
 auto Client::Series() const -> const std::optional<SeriesSlug>& { return impl_->series; }
 
@@ -339,6 +381,12 @@ properties:
     secdist-alias:
         type: string
         description: the block under `slugkit` in the secdist document holding api_key (and optionally base_url); wins over api-key and base-url
+    metrics-prefix:
+        type: string
+        description: >-
+            Where the per-operation request counters and latency histograms are
+            written in the statistics storage (slugkit/metrics.hpp)
+        defaultDescription: slugkit.client
     user-agent:
         type: string
         description: User-Agent header sent with every request

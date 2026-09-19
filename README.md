@@ -358,6 +358,26 @@ private:
 };
 ```
 
+## Metrics
+
+The client writes to the statistics storage under `metrics-prefix` (default
+`slugkit.client`), labelled `slugkit_client` with the component's name so two
+clients in one process never emit the same series:
+
+| Metric | Labels | |
+|---|---|---|
+| `requests` | `operation`, `outcome` | rate, one per round trip — retries included |
+| `retries` | `operation` | rate, round trips that were tried again |
+| `duration-ms` | `operation` | histogram, one per round trip |
+
+`outcome` follows the exceptions below: `ok`, `transport_error`, `unauthorized`,
+`forbidden`, `not_found`, `rate_limited`, `client_error`, `server_error`,
+`malformed`. A round trip rather than a call is the unit: a mint that succeeded
+on its fourth attempt is three failures and a success, and counting it as one
+success is how a cold-starting dependency hides behind the retry loop. The
+pool's own metrics (above) say whether there are slugs to hand out; these say
+how the calls that fill it are going.
+
 ## Errors
 
 Every failure surfaces as a subtype of `slugkit::sdk::Error`. Catch the
