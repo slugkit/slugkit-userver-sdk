@@ -23,20 +23,21 @@ auto Index(Outcome outcome) noexcept -> std::size_t { return static_cast<std::si
 }  // namespace
 
 auto OutcomeForStatus(int status) noexcept -> Outcome {
-    if (status / 100 == 2) return Outcome::kOk;
+    namespace http = userver::server::http;
+    if (IsSuccess(status)) return Outcome::kOk;
     switch (status) {
-        case 401:
+        case http::HttpStatus::kUnauthorized:
             return Outcome::kUnauthorized;
-        case 403:
+        case http::HttpStatus::kForbidden:
             return Outcome::kForbidden;
-        case 404:
+        case http::HttpStatus::kNotFound:
             return Outcome::kNotFound;
-        case 429:
+        case http::HttpStatus::kTooManyRequests:
             return Outcome::kRateLimited;
         default:
             break;
     }
-    if (status >= 500) return Outcome::kServerError;
+    if (status >= http::HttpStatus::kInternalServerError) return Outcome::kServerError;
     return Outcome::kClientError;
 }
 
