@@ -14,6 +14,7 @@
 #include <userver/formats/json/value.hpp>
 #include <userver/formats/json/value_builder.hpp>
 #include <userver/logging/log.hpp>
+#include <userver/server/http/http_status.hpp>
 #include <userver/storages/secdist/component.hpp>
 #include <userver/utils/statistics/entry.hpp>
 #include <userver/utils/statistics/labels.hpp>
@@ -65,9 +66,12 @@ auto BackoffFor(const RetryPolicy& policy, std::size_t attempt_index) -> std::ch
     // attempt_index is 1 for the first failure, 2 for the second, etc.
     // delay = initial * 2^(attempt_index - 1), clamped at max_backoff.
     auto shift = attempt_index > 0 ? attempt_index - 1 : 0;
-    // Guard against overflow on absurd configs — anything past ~20
-    // doublings is meaningless once clamped, so saturate the shift.
-    shift = std::min<std::size_t>(shift, 20);
+    // Guard against overflow on absurd configs — anything past this many
+    // doublings is meaningless once clamped, so saturate the shift. It is well
+    // under the 63 that would overflow the int64 below, which is the point: the
+    // saturation is about the shift being meaningless, not about it being UB.
+    constexpr std::size_t kMaxBackoffDoublings = 20;
+    shift = std::min(shift, kMaxBackoffDoublings);
     auto scaled = std::chrono::milliseconds{
         policy.initial_backoff.count() * (std::int64_t{1} << shift),
     };
@@ -94,24 +98,25 @@ auto ExtractReason(std::string_view body) -> std::string {
 }
 
 [[noreturn]] void ThrowForStatus(int status, std::string_view operation, std::string_view body) {
+    namespace http = userver::server::http;
     auto reason = ExtractReason(body);
     auto message = fmt::format("slugkit {}: HTTP {} — {}", operation, status, reason);
     switch (status) {
-        case 401:
+        case http::HttpStatus::kUnauthorized:
             throw Unauthorized{std::move(message)};
-        case 403:
+        case http::HttpStatus::kForbidden:
             throw Forbidden{std::move(message)};
-        case 404:
+        case http::HttpStatus::kNotFound:
             throw NotFound{std::move(message)};
-        case 429:
+        case http::HttpStatus::kTooManyRequests:
             throw RateLimited{std::move(message)};
         default:
             break;
     }
-    if (status >= 500) {
+    if (status >= http::HttpStatus::kInternalServerError) {
         throw ServerError{std::move(message)};
     }
-    if (status >= 400) {
+    if (status >= http::HttpStatus::kBadRequest) {
         throw ClientError{std::move(message)};
     }
     // 2xx-3xx land here only if a caller misroutes — still surface as
@@ -262,7 +267,7 @@ struct Client::Impl {
 
         const auto status = static_cast<int>(response->status_code());
         const auto body_str = response->body();
-        if (status / 100 != 2) {
+        if (!IsSuccess(status)) {
             account(OutcomeForStatus(status));
             ThrowForStatus(status, operation, body_str);
         }

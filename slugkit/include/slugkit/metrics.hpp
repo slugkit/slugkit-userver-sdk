@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <string_view>
 
+#include <userver/server/http/http_status.hpp>
 #include <userver/utils/statistics/by_label_storage.hpp>
 #include <userver/utils/statistics/histogram.hpp>
 #include <userver/utils/statistics/rate_counter.hpp>
@@ -51,6 +52,17 @@ enum class Outcome {
 };
 
 inline constexpr std::size_t kOutcomeCount = 9;
+
+/// Whether a status is in the 2xx class.
+///
+/// One predicate because two places ask it — the client's error path and
+/// the outcome mapping below — and `status / 100 == 2` written twice is two
+/// spellings of one rule. `kMultipleChoices` (300) is the first status that is
+/// not a success, so it bounds the class without being in it.
+[[nodiscard]] constexpr auto IsSuccess(int status) noexcept -> bool {
+    return status >= userver::server::http::HttpStatus::kOk
+        && status < userver::server::http::HttpStatus::kMultipleChoices;
+}
 
 /// The outcome of an HTTP status, by the same mapping the client's exceptions
 /// use. A 2xx is @ref Outcome::kOk.
