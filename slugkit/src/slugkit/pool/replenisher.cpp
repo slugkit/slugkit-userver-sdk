@@ -100,7 +100,11 @@ Replenisher::Replenisher(
         throw std::runtime_error{"slugkit-pool: `series` must list at least one series to keep topped up"};
     }
 
-    statistics_holder_ = context.FindComponent<userver::components::StatisticsStorage>().GetStorage().RegisterWriter(
+    // Scoped, so the writer is unregistered before the destructor starts —
+    // earlier than the replaced `Entry` member managed, which was torn down
+    // only after `task_` had stopped.
+    userver::utils::statistics::RegisterWriterScope(
+        context,
         config["metrics-prefix"].As<std::string>("slug-pool"),
         [this](userver::utils::statistics::Writer& writer) { WriteStatistics(writer); }
     );
@@ -130,10 +134,7 @@ Replenisher::Replenisher(
     }
 }
 
-Replenisher::~Replenisher() {
-    task_.Stop();
-    statistics_holder_.Unregister();
-}
+Replenisher::~Replenisher() { task_.Stop(); }
 
 auto Replenisher::GetStaticConfigSchema() -> userver::yaml_config::Schema {
     return userver::yaml_config::MergeSchemas<userver::components::ComponentBase>(R"(

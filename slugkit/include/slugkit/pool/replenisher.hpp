@@ -8,7 +8,6 @@
 
 #include <userver/components/component_base.hpp>
 #include <userver/utils/periodic_task.hpp>
-#include <userver/utils/statistics/entry.hpp>
 #include <userver/utils/statistics/writer.hpp>
 #include <userver/yaml_config/schema.hpp>
 
@@ -120,7 +119,6 @@ private:
     Storage& storage_;
     /// Indirected because SeriesStats holds atomics, which a vector cannot move.
     std::vector<std::unique_ptr<SeriesState>> series_;
-    userver::utils::statistics::Entry statistics_holder_;
     userver::utils::PeriodicTask task_;
 };
 
