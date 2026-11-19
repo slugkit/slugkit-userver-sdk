@@ -16,7 +16,6 @@
 #include <userver/logging/log.hpp>
 #include <userver/server/http/http_status.hpp>
 #include <userver/storages/secdist/component.hpp>
-#include <userver/utils/statistics/entry.hpp>
 #include <userver/utils/statistics/labels.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
 
@@ -190,10 +189,6 @@ struct Client::Impl {
     /// Mutable because a call is logically const — it asks SlugKit something —
     /// and counting it is bookkeeping about the call, not a change to the client.
     mutable ClientMetrics metrics;
-    /// Registered by the component once `metrics` exists, unregistered before
-    /// it goes.
-    userver::utils::statistics::Entry statistics_holder;
-
     Impl(
         const userver::components::ComponentConfig& config,
         const userver::components::ComponentContext& context
@@ -355,19 +350,25 @@ Client::Client(
     for (const auto* operation : {"mint", "forge", "slice", "reset", "pattern-info"}) {
         impl_->metrics.Declare(operation);
     }
-    impl_->statistics_holder =
-        context.FindComponent<userver::components::StatisticsStorage>().GetStorage().RegisterWriter(
-            config["metrics-prefix"].As<std::string>("slugkit.client"),
-            [this](userver::utils::statistics::Writer& writer) { writer = impl_->metrics; },
-            // By component name: a process can hold more than one client — the
-            // omnibus runs authx's and station's side by side — and two writers
-            // under one prefix without a label between them would emit the same
-            // series twice, which Prometheus refuses as a malformed scrape.
-            {userver::utils::statistics::Label{"slugkit_client", std::string{config.Name()}}}
-        );
+    // Scoped, so the writer is unregistered before the destructor starts and
+    // so before `impl_->metrics`, which it reads, goes. That is what the
+    // replaced `Entry` member's own comment promised by hand, and it is a
+    // property of the registration now.
+    userver::utils::statistics::RegisterWriterScope(
+        context,
+        config["metrics-prefix"].As<std::string>("slugkit.client"),
+        [this](userver::utils::statistics::Writer& writer) { writer = impl_->metrics; },
+        // By component name: a process can hold more than one client — the
+        // omnibus runs authx's and station's side by side — and two writers
+        // under one prefix without a label between them would emit the same
+        // series twice, which Prometheus refuses as a malformed scrape.
+        {userver::utils::statistics::Label{"slugkit_client", std::string{config.Name()}}}
+    );
 }
 
-Client::~Client() { impl_->statistics_holder.Unregister(); }
+// Still out of line for FastPimpl's sake; there is no longer anything to
+// unregister by hand.
+Client::~Client() = default;
 
 auto Client::Series() const -> const std::optional<SeriesSlug>& { return impl_->series; }
 
